@@ -70,14 +70,14 @@ function App() {
       // Draw the video frame to canvas
       ctx.drawImage(video, 0, 0);
 
-      // Create preview from original color image
+      // Create preview from original color image (keep full quality for display)
       canvas.toBlob((blob) => {
         const url = URL.createObjectURL(blob);
         setPreviewUrl(url);
         setImage(blob);
         stopCamera();
         processReceipt(blob);
-      }, 'image/jpeg', 0.95); // High quality JPEG
+      }, 'image/jpeg', 1.0); // Maximum quality
     }
   };
 
@@ -108,43 +108,43 @@ function App() {
       let bestResult = null;
       let bestScore = 0;
 
-      // First attempt with default settings
-      setStatus('OCR attempt 1 - Standard settings...');
+      // First attempt with Myanmar language
+      setStatus('OCR attempt 1 - Myanmar text recognition...');
       const result1 = await Tesseract.recognize(
         imageFile,
-        ocrLanguage,
+        'mya',
         {
           logger: (m) => {
             if (m.status === 'recognizing text') {
-              setStatus(`OCR attempt 1... ${Math.round(m.progress * 100)}%`);
+              setStatus(`Myanmar OCR... ${Math.round(m.progress * 100)}%`);
               setProgress(Math.round(m.progress * 100));
             } else {
               setStatus(m.status);
             }
           },
+          tessjs_config_page_seg_mode: '3',
         }
       );
 
       bestResult = result1;
       bestScore = result1.data.text.replace(/\s/g, '').length;
 
-      // Second attempt with enhanced settings if first attempt has low confidence
+      // Second attempt with English if Myanmar didn't get enough text
       if (bestScore < 50) {
-        setStatus('OCR attempt 2 - Enhanced settings...');
+        setStatus('OCR attempt 2 - English recognition...');
         const result2 = await Tesseract.recognize(
           imageFile,
-          ocrLanguage,
+          'eng',
           {
             logger: (m) => {
               if (m.status === 'recognizing text') {
-                setStatus(`OCR attempt 2... ${Math.round(m.progress * 100)}%`);
+                setStatus(`English OCR... ${Math.round(m.progress * 100)}%`);
                 setProgress(Math.round(m.progress * 100));
               } else {
                 setStatus(m.status);
               }
             },
-            tessjs_config_page_seg_mode: '4', // Assume a single column of text
-            tessjs_config_tessedit_char_whitelist: '၀၁၃၄၅၇၈၉0123456789.,MMKkyatMyanmarကြောင်းလခစွန့်လုပ်ငန်းယဉ်ဆေးဘေငွေပြည်ရန်တန်ဖိုးခုနှစ်ဆယ်သောင်းထောင်ရာကြော်ငြာ',
+            tessjs_config_page_seg_mode: '3',
           }
         );
 
@@ -155,22 +155,22 @@ function App() {
         }
       }
 
-      // Third attempt with English + Myanmar if still low score
-      if (bestScore < 50 && ocrLanguage !== 'eng+mya') {
-        setStatus('OCR attempt 3 - Bilingual mode...');
+      // Third attempt with bilingual if still low score
+      if (bestScore < 50) {
+        setStatus('OCR attempt 3 - Bilingual recognition...');
         const result3 = await Tesseract.recognize(
           imageFile,
           'eng+mya',
           {
             logger: (m) => {
               if (m.status === 'recognizing text') {
-                setStatus(`OCR attempt 3... ${Math.round(m.progress * 100)}%`);
+                setStatus(`Bilingual OCR... ${Math.round(m.progress * 100)}%`);
                 setProgress(Math.round(m.progress * 100));
               } else {
                 setStatus(m.status);
               }
             },
-            tessjs_config_page_seg_mode: '6',
+            tessjs_config_page_seg_mode: '3',
           }
         );
 
@@ -183,11 +183,8 @@ function App() {
 
       setStatus('Analyzing receipt data...');
       const extractedText = bestResult.data.text;
-      console.log('Extracted text:', extractedText); // Debug log
-
-      // Show confidence level
-      const avgConfidence = bestResult.data.confidence;
-      console.log('OCR confidence:', avgConfidence);
+      console.log('Final extracted text:', extractedText);
+      console.log('Best OCR confidence:', bestResult.data.confidence);
 
       parseReceipt(extractedText);
     } catch (error) {
@@ -210,41 +207,63 @@ function App() {
     let calculatedTotal = 0;
     let hasExplicitTotal = false;
 
-    console.log('Parsing receipt with text:', text); // Debug log
+    console.log('=== PARSING RECEIPT ===');
+    console.log('Full extracted text:', text);
+    console.log('Lines:', lines);
+
+    // Myanmar number patterns
+    const myanmarDigits = ['၀', '', '၂', '', '၄', '', '၆', '', '၈', ''];
+    const myanmarToEnglish = {
+      '၀': '0', '၁': '1', '၂': '2', '၃': '3', '၄': '4',
+      '၅': '5', '၆': '6', '၇': '7', '၈': '8', '၉': '9'
+    };
+
+    // Convert Myanmar numbers to English
+    const convertMyanmarToEnglish = (str) => {
+      let result = str;
+      Object.keys(myanmarToEnglish).forEach(myanmar => {
+        result = result.split(myanmar).join(myanmarToEnglish[myanmar]);
+      });
+      return result;
+    };
 
     // Support multiple price formats for Myanmar receipts
-    // Handles: "2,000", "2000", "20,000", "600", "70000", etc.
+    // Handles: "2,000", "2000", "၂,၀၀", "70,000", etc.
     const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|ကျပ်|kyat|Kyat)?$/gi;
-    const totalRegex = /(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|စုစု|တန်ဖိုး|စုစုပေါင်းတန်ဖိုး)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|မြန်မာကျပ်|kyat|Kyat)?/i;
+    const totalRegex = /(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|စုစု|တန်ဖိုး|စုစုပေါင်းတန်ဖိုး|ပေါင်း)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|မြန်မာကျပ်|kyat|Kyat)?/i;
 
     // First pass: Look for explicit total line
     lines.forEach(line => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
 
-      // Check for explicit total
-      const totalMatch = trimmedLine.match(totalRegex);
+      const convertedLine = convertMyanmarToEnglish(trimmedLine);
+      const totalMatch = convertedLine.match(totalRegex);
       if (totalMatch && !hasExplicitTotal) {
         const amount = parseFloat(totalMatch[2].replace(/,/g, ''));
-        if (amount > 0) {
+        if (amount > 0 && amount < 10000000) {
           calculatedTotal = amount;
           hasExplicitTotal = true;
+          console.log('Found explicit total:', amount);
         }
       }
     });
 
     // Second pass: Extract all items
-    lines.forEach(line => {
+    lines.forEach((line, index) => {
       const trimmedLine = line.trim();
-      if (!trimmedLine) return;
+      if (!trimmedLine || trimmedLine.length < 2) return;
+
+      // Convert Myanmar numbers for price detection
+      const convertedLine = convertMyanmarToEnglish(trimmedLine);
 
       // Skip header lines or total lines
-      if (/^(total|amount|balance|due|subtotal|sum|စုစုပေါင်း)/i.test(trimmedLine)) {
+      if (/^(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|နံပါတ်)/i.test(convertedLine)) {
         return;
       }
 
       // Check for line items with prices at the end of line
-      const matches = [...trimmedLine.matchAll(priceRegex)];
+      const matches = [...convertedLine.matchAll(priceRegex)];
       if (matches.length > 0) {
         const lastMatch = matches[matches.length - 1];
         const priceStr = lastMatch[1].replace(/,/g, '');
@@ -252,22 +271,24 @@ function App() {
 
         // Show all items regardless of price
         if (price > 0 && price < 10000000) {
-          const itemText = trimmedLine.substring(0, lastMatch.index).trim();
+          let itemText = trimmedLine.substring(0, lastMatch.index).trim();
 
-          // Clean up item name - remove leading numbers, dots, dashes, and special chars
+          // Clean up item name
           let cleanedName = itemText
             .replace(/^\d+[\.\)]\s*/, '') // Remove "1. " or "1) "
             .replace(/^[-•]\s*/, '') // Remove "- " or "• "
             .replace(/[:|]\s*$/, '') // Remove trailing colons or pipes
             .trim();
 
-          // Only accept if we have meaningful content
+          // Accept Myanmar text as item name
           if (cleanedName.length > 0 || price > 100) {
             foundItems.push({
-              name: cleanedName || 'Item',
+              name: cleanedName || trimmedLine.substring(0, Math.min(30, trimmedLine.length)),
               price: price,
               isTotal: false
             });
+
+            console.log(`Item ${foundItems.length}:`, foundItems[foundItems.length - 1]);
 
             // Sum items if no explicit total
             if (!hasExplicitTotal) {
@@ -278,23 +299,23 @@ function App() {
       }
     });
 
-    // If no items found with price regex, try alternative parsing
+    // If no items found, try alternative parsing - look for lines with just prices
     if (foundItems.length === 0) {
       console.log('Trying alternative parsing method...');
-      // Look for lines with just numbers (price only lines)
       const priceOnlyRegex = /^\s*(\d{1,3}(?:,\d{3})+|\d{3,})\s*$/;
       let currentName = '';
       
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
+        const convertedLine = convertMyanmarToEnglish(line);
         
         // Check if this line is a price
-        const priceMatch = line.match(priceOnlyRegex);
+        const priceMatch = convertedLine.match(priceOnlyRegex);
         if (priceMatch) {
           const price = parseFloat(priceMatch[1].replace(/,/g, ''));
           if (price > 0 && price < 10000000) {
             foundItems.push({
-              name: currentName || 'Item',
+              name: currentName || `Item ${foundItems.length + 1}`,
               price: price,
               isTotal: false
             });
@@ -303,7 +324,7 @@ function App() {
             }
           }
           currentName = '';
-        } else if (line.length > 2 && !/^(total|amount|balance)/i.test(line)) {
+        } else if (line.length > 2 && !/^(total|amount|balance)/i.test(convertedLine)) {
           // This might be an item name
           currentName = line;
         }
@@ -313,11 +334,15 @@ function App() {
     // Add total item at the end if we found one
     if (hasExplicitTotal) {
       foundItems.push({ 
-        name: 'TOTAL', 
+        name: 'စုစုပေါင်း (TOTAL)', 
         price: calculatedTotal, 
         isTotal: true 
       });
     }
+
+    console.log('=== PARSING COMPLETE ===');
+    console.log('Found items:', foundItems);
+    console.log('Total:', calculatedTotal);
 
     setItems(foundItems);
     setTotal(calculatedTotal);
@@ -506,3 +531,4 @@ function App() {
 }
 
 export default App;
+
