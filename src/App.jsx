@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import Tesseract from 'tesseract.js';
 import './App.css';
 
@@ -21,21 +21,29 @@ function App() {
   // Start camera
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' }
       });
       streamRef.current = stream;
       setUseCamera(true);
-      setStatus('Camera ready - Click "Capture" to take photo');
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
+      setStatus('Starting camera preview...');
     } catch (err) {
       setStatus('Camera access denied');
       console.error('Camera error:', err);
     }
   };
+
+  // Effect to handle video stream when camera mode changes
+  useEffect(() => {
+    if (useCamera && streamRef.current && videoRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(err => {
+        console.error('Video play error:', err);
+        setStatus('Error starting camera preview');
+      });
+      setStatus('Camera ready - Click "Capture" to take photo');
+    }
+  }, [useCamera]);
 
   // Stop camera
   const stopCamera = () => {
@@ -296,10 +304,11 @@ function App() {
         {useCamera && (
           <div className="camera-section">
             <div className="camera-container">
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
                 className="camera-preview"
               />
               <canvas ref={canvasRef} style={{ display: 'none' }} />
