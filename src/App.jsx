@@ -22,7 +22,11 @@ function App() {
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
       });
       streamRef.current = stream;
       setUseCamera(true);
@@ -62,15 +66,18 @@ function App() {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
       
+      // Draw the video frame to canvas
+      ctx.drawImage(video, 0, 0);
+
+      // Create preview from original color image
       canvas.toBlob((blob) => {
         const url = URL.createObjectURL(blob);
         setPreviewUrl(url);
         setImage(blob);
         stopCamera();
         processReceipt(blob);
-      }, 'image/png');
+      }, 'image/jpeg', 0.95); // High quality JPEG
     }
   };
 
@@ -96,46 +103,93 @@ function App() {
     try {
       // Preprocess image for better OCR results
       setStatus('Preprocessing image for better recognition...');
-      
-      const result = await Tesseract.recognize(
+
+      // Try OCR multiple times with different configurations for better results
+      let bestResult = null;
+      let bestScore = 0;
+
+      // First attempt with default settings
+      setStatus('OCR attempt 1 - Standard settings...');
+      const result1 = await Tesseract.recognize(
         imageFile,
         ocrLanguage,
         {
           logger: (m) => {
             if (m.status === 'recognizing text') {
-              setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
+              setStatus(`OCR attempt 1... ${Math.round(m.progress * 100)}%`);
               setProgress(Math.round(m.progress * 100));
             } else {
               setStatus(m.status);
             }
           },
-          tessedit_char_whitelist: '၀၁၂၃၄၅၆၇၈၉0123456789,.MMKkyat Myanmar ကြောင်း လခ စွန့် လုပ် ငန်း ယဉ် ဆေး ဘေ ငွေ ပြည် ရန် တန် ဖိုး ခု နှစ် ဆယ် သောင်း ထောင် ရာ',
         }
       );
 
-      setStatus('Analyzing receipt data...');
-      const extractedText = result.data.text;
-      console.log('Extracted text:', extractedText); // Debug log
-      
-      // Try multiple times with different settings if Myanmar text is not recognized
-      if (extractedText.replace(/\s/g, '').length < 20) {
-        setStatus('Retrying with enhanced settings...');
-        const retryResult = await Tesseract.recognize(
+      bestResult = result1;
+      bestScore = result1.data.text.replace(/\s/g, '').length;
+
+      // Second attempt with enhanced settings if first attempt has low confidence
+      if (bestScore < 50) {
+        setStatus('OCR attempt 2 - Enhanced settings...');
+        const result2 = await Tesseract.recognize(
+          imageFile,
+          ocrLanguage,
+          {
+            logger: (m) => {
+              if (m.status === 'recognizing text') {
+                setStatus(`OCR attempt 2... ${Math.round(m.progress * 100)}%`);
+                setProgress(Math.round(m.progress * 100));
+              } else {
+                setStatus(m.status);
+              }
+            },
+            tessjs_config_page_seg_mode: '4', // Assume a single column of text
+            tessjs_config_tessedit_char_whitelist: '၀၁၃၄၅၇၈၉0123456789.,MMKkyatMyanmarကြောင်းလခစွန့်လုပ်ငန်းယဉ်ဆေးဘေငွေပြည်ရန်တန်ဖိုးခုနှစ်ဆယ်သောင်းထောင်ရာကြော်ငြာ',
+          }
+        );
+
+        const score2 = result2.data.text.replace(/\s/g, '').length;
+        if (score2 > bestScore) {
+          bestResult = result2;
+          bestScore = score2;
+        }
+      }
+
+      // Third attempt with English + Myanmar if still low score
+      if (bestScore < 50 && ocrLanguage !== 'eng+mya') {
+        setStatus('OCR attempt 3 - Bilingual mode...');
+        const result3 = await Tesseract.recognize(
           imageFile,
           'eng+mya',
           {
             logger: (m) => {
               if (m.status === 'recognizing text') {
-                setStatus(`Retrying OCR... ${Math.round(m.progress * 100)}%`);
+                setStatus(`OCR attempt 3... ${Math.round(m.progress * 100)}%`);
                 setProgress(Math.round(m.progress * 100));
+              } else {
+                setStatus(m.status);
               }
-            }
+            },
+            tessjs_config_page_seg_mode: '6',
           }
         );
-        parseReceipt(retryResult.data.text);
-      } else {
-        parseReceipt(extractedText);
+
+        const score3 = result3.data.text.replace(/\s/g, '').length;
+        if (score3 > bestScore) {
+          bestResult = result3;
+          bestScore = score3;
+        }
       }
+
+      setStatus('Analyzing receipt data...');
+      const extractedText = bestResult.data.text;
+      console.log('Extracted text:', extractedText); // Debug log
+
+      // Show confidence level
+      const avgConfidence = bestResult.data.confidence;
+      console.log('OCR confidence:', avgConfidence);
+
+      parseReceipt(extractedText);
     } catch (error) {
       setStatus('Error processing receipt');
       console.error('OCR Error:', error);
@@ -156,11 +210,14 @@ function App() {
     let calculatedTotal = 0;
     let hasExplicitTotal = false;
 
+    console.log('Parsing receipt with text:', text); // Debug log
+
     // Support multiple price formats for Myanmar receipts
     // Handles: "2,000", "2000", "20,000", "600", "70000", etc.
-    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*$/gi;
-    const totalRegex = /(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|စုစု|တန်ဖိုး)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|မြန်မာကျပ်|kyat|Kyat)?/i;
+    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|ကျပ်|kyat|Kyat)?$/gi;
+    const totalRegex = /(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|စုစု|တန်ဖိုး|စုစုပေါင်းတန်ဖိုး)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|မြန်မာကျပ်|kyat|Kyat)?/i;
 
+    // First pass: Look for explicit total line
     lines.forEach(line => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
@@ -172,8 +229,17 @@ function App() {
         if (amount > 0) {
           calculatedTotal = amount;
           hasExplicitTotal = true;
-          foundItems.push({ name: 'TOTAL', price: amount, isTotal: true });
         }
+      }
+    });
+
+    // Second pass: Extract all items
+    lines.forEach(line => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return;
+
+      // Skip header lines or total lines
+      if (/^(total|amount|balance|due|subtotal|sum|စုစုပေါင်း)/i.test(trimmedLine)) {
         return;
       }
 
@@ -187,15 +253,16 @@ function App() {
         // Show all items regardless of price
         if (price > 0 && price < 10000000) {
           const itemText = trimmedLine.substring(0, lastMatch.index).trim();
-          
+
           // Clean up item name - remove leading numbers, dots, dashes, and special chars
           let cleanedName = itemText
             .replace(/^\d+[\.\)]\s*/, '') // Remove "1. " or "1) "
             .replace(/^[-•]\s*/, '') // Remove "- " or "• "
-            .replace(/[^\u1000-\u109F\s\-()]/g, '') // Remove non-Myanmar characters but keep spaces, dashes, parentheses
+            .replace(/[:|]\s*$/, '') // Remove trailing colons or pipes
             .trim();
-          
-          if (cleanedName || price > 100) { // Accept items with no name if price is significant
+
+          // Only accept if we have meaningful content
+          if (cleanedName.length > 0 || price > 100) {
             foundItems.push({
               name: cleanedName || 'Item',
               price: price,
@@ -211,8 +278,49 @@ function App() {
       }
     });
 
+    // If no items found with price regex, try alternative parsing
+    if (foundItems.length === 0) {
+      console.log('Trying alternative parsing method...');
+      // Look for lines with just numbers (price only lines)
+      const priceOnlyRegex = /^\s*(\d{1,3}(?:,\d{3})+|\d{3,})\s*$/;
+      let currentName = '';
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        
+        // Check if this line is a price
+        const priceMatch = line.match(priceOnlyRegex);
+        if (priceMatch) {
+          const price = parseFloat(priceMatch[1].replace(/,/g, ''));
+          if (price > 0 && price < 10000000) {
+            foundItems.push({
+              name: currentName || 'Item',
+              price: price,
+              isTotal: false
+            });
+            if (!hasExplicitTotal) {
+              calculatedTotal += price;
+            }
+          }
+          currentName = '';
+        } else if (line.length > 2 && !/^(total|amount|balance)/i.test(line)) {
+          // This might be an item name
+          currentName = line;
+        }
+      }
+    }
+
+    // Add total item at the end if we found one
+    if (hasExplicitTotal) {
+      foundItems.push({ 
+        name: 'TOTAL', 
+        price: calculatedTotal, 
+        isTotal: true 
+      });
+    }
+
     setItems(foundItems);
-    setTotal(hasExplicitTotal ? calculatedTotal : calculatedTotal);
+    setTotal(calculatedTotal);
     setStatus(`Done! Found ${foundItems.length} items`);
   };
 
