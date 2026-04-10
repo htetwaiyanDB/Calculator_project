@@ -11,8 +11,7 @@ function App() {
   const [status, setStatus] = useState('Ready - Scan a receipt to begin');
   const [progress, setProgress] = useState(0);
   const [useCamera, setUseCamera] = useState(false);
-  const [ocrLanguage, setOcrLanguage] = useState('mya'); // Default to Myanmar
-  
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -101,22 +100,16 @@ function App() {
     setTotal(0);
 
     try {
-      // Preprocess image for better OCR results
-      setStatus('Preprocessing image for better recognition...');
+      setStatus('Processing image with OCR...');
 
-      // Try OCR multiple times with different configurations for better results
-      let bestResult = null;
-      let bestScore = 0;
-
-      // First attempt with Myanmar language
-      setStatus('OCR attempt 1 - Myanmar text recognition...');
-      const result1 = await Tesseract.recognize(
+      // Single OCR attempt with English
+      const result = await Tesseract.recognize(
         imageFile,
-        'mya',
+        'eng',
         {
           logger: (m) => {
             if (m.status === 'recognizing text') {
-              setStatus(`Myanmar OCR... ${Math.round(m.progress * 100)}%`);
+              setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
               setProgress(Math.round(m.progress * 100));
             } else {
               setStatus(m.status);
@@ -126,65 +119,10 @@ function App() {
         }
       );
 
-      bestResult = result1;
-      bestScore = result1.data.text.replace(/\s/g, '').length;
-
-      // Second attempt with English if Myanmar didn't get enough text
-      if (bestScore < 50) {
-        setStatus('OCR attempt 2 - English recognition...');
-        const result2 = await Tesseract.recognize(
-          imageFile,
-          'eng',
-          {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                setStatus(`English OCR... ${Math.round(m.progress * 100)}%`);
-                setProgress(Math.round(m.progress * 100));
-              } else {
-                setStatus(m.status);
-              }
-            },
-            tessjs_config_page_seg_mode: '3',
-          }
-        );
-
-        const score2 = result2.data.text.replace(/\s/g, '').length;
-        if (score2 > bestScore) {
-          bestResult = result2;
-          bestScore = score2;
-        }
-      }
-
-      // Third attempt with bilingual if still low score
-      if (bestScore < 50) {
-        setStatus('OCR attempt 3 - Bilingual recognition...');
-        const result3 = await Tesseract.recognize(
-          imageFile,
-          'eng+mya',
-          {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                setStatus(`Bilingual OCR... ${Math.round(m.progress * 100)}%`);
-                setProgress(Math.round(m.progress * 100));
-              } else {
-                setStatus(m.status);
-              }
-            },
-            tessjs_config_page_seg_mode: '3',
-          }
-        );
-
-        const score3 = result3.data.text.replace(/\s/g, '').length;
-        if (score3 > bestScore) {
-          bestResult = result3;
-          bestScore = score3;
-        }
-      }
-
       setStatus('Analyzing receipt data...');
-      const extractedText = bestResult.data.text;
-      console.log('Final extracted text:', extractedText);
-      console.log('Best OCR confidence:', bestResult.data.confidence);
+      const extractedText = result.data.text;
+      console.log('Extracted text:', extractedText);
+      console.log('OCR confidence:', result.data.confidence);
 
       parseReceipt(extractedText);
     } catch (error) {
@@ -195,50 +133,36 @@ function App() {
     }
   };
 
-  // Change OCR language
-  const handleLanguageChange = (lang) => {
-    setOcrLanguage(lang);
-  };
-
   // Parse receipt text to extract items and total
   const parseReceipt = (text) => {
     const lines = text.split('\n').filter(line => line.trim());
     const foundItems = [];
     let calculatedTotal = 0;
     let hasExplicitTotal = false;
+    let itemCount = 0;
 
     console.log('=== PARSING RECEIPT ===');
     console.log('Full extracted text:', text);
     console.log('Lines:', lines);
 
-    // Myanmar number patterns
-    const myanmarDigits = ['၀', '', '၂', '', '၄', '', '၆', '', '၈', ''];
-    const myanmarToEnglish = {
-      '၀': '0', '၁': '1', '၂': '2', '၃': '3', '၄': '4',
-      '၅': '5', '၆': '6', '၇': '7', '၈': '8', '၉': '9'
-    };
+    // Support multiple price formats
+    // Handles: "2,000", "2000", "20,000", "600", "70000", etc.
+    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|USD|\$|€|£)?$/gi;
+    const totalRegex = /(total|amount|balance|due|subtotal|sum|grand\s*total)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|USD|\$|€|£)?/i;
 
-    // Convert Myanmar numbers to English
-    const convertMyanmarToEnglish = (str) => {
-      let result = str;
-      Object.keys(myanmarToEnglish).forEach(myanmar => {
-        result = result.split(myanmar).join(myanmarToEnglish[myanmar]);
-      });
-      return result;
+    // Helper function to check if text contains mostly ASCII printable characters
+    const isCleanText = (str) => {
+      const cleanChars = str.replace(/[a-zA-Z0-9\s\-\.\,\(\)\:\/\\]/g, '').length;
+      const totalChars = str.length;
+      return cleanChars < totalChars * 0.3; // Less than 30% non-ASCII
     };
-
-    // Support multiple price formats for Myanmar receipts
-    // Handles: "2,000", "2000", "၂,၀၀", "70,000", etc.
-    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|ကျပ်|kyat|Kyat)?$/gi;
-    const totalRegex = /(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|စုစု|တန်ဖိုး|စုစုပေါင်းတန်ဖိုး|ပေါင်း)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|မြန်မာကျပ်|kyat|Kyat)?/i;
 
     // First pass: Look for explicit total line
     lines.forEach(line => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
 
-      const convertedLine = convertMyanmarToEnglish(trimmedLine);
-      const totalMatch = convertedLine.match(totalRegex);
+      const totalMatch = trimmedLine.match(totalRegex);
       if (totalMatch && !hasExplicitTotal) {
         const amount = parseFloat(totalMatch[2].replace(/,/g, ''));
         if (amount > 0 && amount < 10000000) {
@@ -254,16 +178,13 @@ function App() {
       const trimmedLine = line.trim();
       if (!trimmedLine || trimmedLine.length < 2) return;
 
-      // Convert Myanmar numbers for price detection
-      const convertedLine = convertMyanmarToEnglish(trimmedLine);
-
       // Skip header lines or total lines
-      if (/^(total|amount|balance|due|subtotal|sum|စုစုပေါင်း|နံပါတ်)/i.test(convertedLine)) {
+      if (/^(total|amount|balance|due|subtotal|sum|item|qty|quantity|description)/i.test(trimmedLine)) {
         return;
       }
 
       // Check for line items with prices at the end of line
-      const matches = [...convertedLine.matchAll(priceRegex)];
+      const matches = [...trimmedLine.matchAll(priceRegex)];
       if (matches.length > 0) {
         const lastMatch = matches[matches.length - 1];
         const priceStr = lastMatch[1].replace(/,/g, '');
@@ -280,10 +201,16 @@ function App() {
             .replace(/[:|]\s*$/, '') // Remove trailing colons or pipes
             .trim();
 
-          // Accept Myanmar text as item name
+          // Use "Item N" format if text is not clean (contains non-ASCII or garbage)
+          if (!isCleanText(cleanedName) || cleanedName.length === 0) {
+            itemCount++;
+            cleanedName = `Item ${itemCount}`;
+          }
+
+          // Accept item if it has content or significant price
           if (cleanedName.length > 0 || price > 100) {
             foundItems.push({
-              name: cleanedName || trimmedLine.substring(0, Math.min(30, trimmedLine.length)),
+              name: cleanedName || `Item ${foundItems.length + 1}`,
               price: price,
               isTotal: false
             });
@@ -307,15 +234,15 @@ function App() {
       
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        const convertedLine = convertMyanmarToEnglish(line);
         
         // Check if this line is a price
-        const priceMatch = convertedLine.match(priceOnlyRegex);
+        const priceMatch = line.match(priceOnlyRegex);
         if (priceMatch) {
           const price = parseFloat(priceMatch[1].replace(/,/g, ''));
           if (price > 0 && price < 10000000) {
+            itemCount++;
             foundItems.push({
-              name: currentName || `Item ${foundItems.length + 1}`,
+              name: isCleanText(currentName) ? currentName : `Item ${itemCount}`,
               price: price,
               isTotal: false
             });
@@ -324,7 +251,7 @@ function App() {
             }
           }
           currentName = '';
-        } else if (line.length > 2 && !/^(total|amount|balance)/i.test(convertedLine)) {
+        } else if (line.length > 2 && !/^(total|amount|balance)/i.test(line)) {
           // This might be an item name
           currentName = line;
         }
@@ -334,7 +261,7 @@ function App() {
     // Add total item at the end if we found one
     if (hasExplicitTotal) {
       foundItems.push({ 
-        name: 'စုစုပေါင်း (TOTAL)', 
+        name: 'TOTAL', 
         price: calculatedTotal, 
         isTotal: true 
       });
@@ -370,21 +297,6 @@ function App() {
 
         {/* Scanner Section */}
         <div className="scanner-section">
-          {/* Language Selector */}
-          <div className="language-selector">
-            <label htmlFor="language-select">Language: </label>
-            <select
-              id="language-select"
-              value={ocrLanguage}
-              onChange={(e) => handleLanguageChange(e.target.value)}
-              className="language-dropdown"
-            >
-              <option value="mya">မြန်မာ (Myanmar)</option>
-              <option value="eng">English</option>
-              <option value="eng+mya">English + Myanmar</option>
-            </select>
-          </div>
-
           <div className="button-group">
             {!useCamera ? (
               <>
