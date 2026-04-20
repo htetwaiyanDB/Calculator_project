@@ -326,10 +326,15 @@ function App() {
         <header className="header">
           <h1 className="title">AI Receipt Scanner</h1>
           <p className="subtitle">Scan, Extract & Calculate Automatically</p>
+          <div className="live-badge">
+            <span className="live-dot" />
+            Real-time OCR Ready
+          </div>
         </header>
 
         {/* Scanner Section */}
         <div className="scanner-section">
+          <p className="scanner-hint">Capture from camera or upload a clear receipt photo</p>
           <div className="button-group">
             {!useCamera ? (
               <>
@@ -338,7 +343,7 @@ function App() {
                   onClick={startCamera}
                   disabled={isProcessing}
                 >
-                  <span className="btn-icon">📷</span>
+                  <span className="btn-icon">CAM</span>
                   Scan from Camera
                 </button>
                 <button
@@ -346,7 +351,7 @@ function App() {
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isProcessing}
                 >
-                  <span className="btn-icon">📁</span>
+                  <span className="btn-icon">UP</span>
                   Upload Receipt
                 </button>
                 <input
@@ -363,14 +368,14 @@ function App() {
                   className="btn btn-success"
                   onClick={captureImage}
                 >
-                  <span className="btn-icon">📸</span>
+                  <span className="btn-icon">CAP</span>
                   Capture
                 </button>
                 <button
                   className="btn btn-cancel"
                   onClick={stopCamera}
                 >
-                  <span className="btn-icon">✕</span>
+                  <span className="btn-icon">X</span>
                   Cancel
                 </button>
               </>
@@ -466,7 +471,7 @@ function App() {
         {/* Status Message */}
         {!isProcessing && items.length === 0 && (
           <div className="empty-state">
-            <div className="empty-icon">🧾</div>
+            <div className="empty-icon">OCR</div>
             <p className="empty-text">{status}</p>
           </div>
         )}
