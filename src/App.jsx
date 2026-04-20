@@ -1,9 +1,70 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+﻿import { useState, useRef, useEffect } from 'react';
 import Tesseract from 'tesseract.js';
 import './App.css';
 
 const PRIMARY_OCR_LANG = 'mya+eng';
 const FALLBACK_OCR_LANG = 'eng';
+const OCR_PSMS = [Tesseract.PSM.SPARSE_TEXT, Tesseract.PSM.SINGLE_BLOCK];
+
+const normalizeWhitespace = (str) => str.replace(/\s+/g, ' ').trim();
+
+const scoreOcrText = (text, confidence) => {
+  if (!text) return -Infinity;
+  const normalized = normalizeWhitespace(text);
+  const length = Math.max(normalized.length, 1);
+  const myanmarChars = (normalized.match(/[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]/g) || []).length;
+  const mojibakeChars = (normalized.match(/[\u00C3\u00C2\u00E2\uFFFD]/g) || []).length;
+  const latinNoiseChars = (normalized.match(/[A-Za-z]/g) || []).length;
+
+  const myanmarRatio = myanmarChars / length;
+  const mojibakeRatio = mojibakeChars / length;
+  const latinRatio = latinNoiseChars / length;
+
+  return confidence + myanmarRatio * 35 - mojibakeRatio * 80 - latinRatio * 8;
+};
+
+const preprocessImageForOcr = async (imageFile) => {
+  const sourceBitmap = await createImageBitmap(imageFile);
+  const scale = 1.8;
+  const width = Math.max(1, Math.floor(sourceBitmap.width * scale));
+  const height = Math.max(1, Math.floor(sourceBitmap.height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(sourceBitmap, 0, 0, width, height);
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  // Convert to high-contrast grayscale to improve OCR on receipts.
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+    // Contrast stretch around mid-point.
+    const contrasted = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
+    const thresholded = contrasted > 138 ? 255 : contrasted < 105 ? 0 : contrasted;
+
+    data[i] = thresholded;
+    data[i + 1] = thresholded;
+    data[i + 2] = thresholded;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+
+  const processedBlob = await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Failed to preprocess image for OCR'));
+    }, 'image/png');
+  });
+
+  return processedBlob;
+};
 
 function App() {
   const [image, setImage] = useState(null);
@@ -103,54 +164,68 @@ function App() {
     setTotal(0);
 
     try {
-      setStatus('Processing image with OCR...');
+      setStatus('Preparing image for OCR...');
+      const processedImage = await preprocessImageForOcr(imageFile);
+      const attempts = [];
 
-      // Prefer Myanmar + English OCR for bilingual receipts; fallback to English.
-      let result;
-      try {
-        result = await Tesseract.recognize(
-          imageFile,
-          PRIMARY_OCR_LANG,
-          {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
-                setProgress(Math.round(m.progress * 100));
-              } else {
-                setStatus(m.status);
-              }
-            },
-            tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
-            preserve_interword_spaces: '1'
-          }
-        );
-      } catch (primaryError) {
-        console.warn('Primary OCR language failed, retrying with English:', primaryError);
+      const runAttempt = async (source, language, psm, label) => {
+        const result = await Tesseract.recognize(source, language, {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setStatus(`Extracting text (${label})... ${Math.round(m.progress * 100)}%`);
+              setProgress(Math.round(m.progress * 100));
+            } else {
+              setStatus(m.status);
+            }
+          },
+          tessedit_pageseg_mode: psm,
+          preserve_interword_spaces: '1'
+        });
+        attempts.push({ result, label });
+      };
+
+      setStatus('Running OCR passes...');
+      for (const psm of OCR_PSMS) {
+        await runAttempt(imageFile, PRIMARY_OCR_LANG, psm, `original-${psm}`);
+      }
+      await runAttempt(processedImage, PRIMARY_OCR_LANG, Tesseract.PSM.SPARSE_TEXT, 'processed');
+
+      let bestAttempt = attempts[0];
+      let bestScore = scoreOcrText(bestAttempt.result?.data?.text || '', bestAttempt.result?.data?.confidence || 0);
+
+      attempts.slice(1).forEach((attempt) => {
+        const score = scoreOcrText(attempt.result?.data?.text || '', attempt.result?.data?.confidence || 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestAttempt = attempt;
+        }
+      });
+
+      let result = bestAttempt.result;
+
+      if (!result?.data?.text?.trim()) {
         setStatus('Retrying OCR with English...');
-        result = await Tesseract.recognize(
-          imageFile,
-          FALLBACK_OCR_LANG,
-          {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
-                setProgress(Math.round(m.progress * 100));
-              } else {
-                setStatus(m.status);
-              }
-            },
-            tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
-            preserve_interword_spaces: '1'
-          }
-        );
+        result = await Tesseract.recognize(imageFile, FALLBACK_OCR_LANG, {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setStatus(`Extracting text (fallback)... ${Math.round(m.progress * 100)}%`);
+              setProgress(Math.round(m.progress * 100));
+            } else {
+              setStatus(m.status);
+            }
+          },
+          tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+          preserve_interword_spaces: '1'
+        });
       }
 
       setStatus('Analyzing receipt data...');
       const extractedText = result.data.text;
       console.log('Extracted text:', extractedText);
       console.log('OCR confidence:', result.data.confidence);
+      console.log('Best OCR pass:', bestAttempt?.label);
 
-      parseReceipt(extractedText);
+      parseReceipt(extractedText, result.data.lines || []);
     } catch (error) {
       setStatus('Error processing receipt');
       console.error('OCR Error:', error);
@@ -160,8 +235,29 @@ function App() {
   };
 
   // Parse receipt text to extract items and total
-  const parseReceipt = (text) => {
-    const lines = text.split('\n').filter(line => line.trim());
+  const parseReceipt = (text, ocrLines = []) => {
+    const linesFromOcr =
+      Array.isArray(ocrLines) && ocrLines.length > 0
+        ? ocrLines
+            .map((line) => {
+              if (!line) return '';
+              if (Array.isArray(line.words) && line.words.length > 0) {
+                return normalizeWhitespace(
+                  line.words
+                    .filter((word) => (word.confidence ?? 0) >= 35)
+                    .map((word) => word.text || '')
+                    .join(' ')
+                );
+              }
+              return normalizeWhitespace(line.text || '');
+            })
+            .filter(Boolean)
+        : [];
+
+    const lines = (linesFromOcr.length > 0 ? linesFromOcr : text.split('\n'))
+      .map((line) => normalizeWhitespace(line))
+      .filter((line) => line.length > 0);
+
     const foundItems = [];
     let calculatedTotal = 0;
     let hasExplicitTotal = false;
@@ -172,24 +268,21 @@ function App() {
     console.log('Lines:', lines);
 
     // Support multiple price formats
-    // Handles: "2,000", "2000", "20,000", "600", "70000", etc.
-    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|USD|\$|€|£)?$/gi;
-    const totalRegex = /(total|amount|balance|due|subtotal|sum|grand\s*total)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|USD|\$|€|£)?/i;
-
-    const normalizeWhitespace = (str) => str.replace(/\s+/g, ' ').trim();
+    const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|USD|\$|â‚¬|Â£)?$/gi;
+    const totalRegex = /(total|amount|balance|due|subtotal|sum|grand\s*total)\s*[$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|USD|\$|â‚¬|Â£)?/i;
 
     // Accept valid Myanmar/Latin strings and reject obvious mojibake artifacts.
     const isCleanText = (str) => {
       const normalized = normalizeWhitespace(str.normalize('NFKC'));
       if (!normalized) return false;
-      if (/[ÃÂâ�]/.test(normalized)) return false;
+      if (/[\u00C3\u00C2\u00E2\uFFFD]/.test(normalized)) return false;
 
       const allowedChars = normalized.match(/[A-Za-z0-9\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF\s\-\.\,\(\)\:\/\\'"]/g) || [];
       return (allowedChars.length / normalized.length) >= 0.7;
     };
 
     // First pass: Look for explicit total line
-    lines.forEach(line => {
+    lines.forEach((line) => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
 
@@ -204,53 +297,92 @@ function App() {
       }
     });
 
+    const extractQuantityFromName = (rawName) => {
+      let name = normalizeWhitespace(rawName);
+      let quantity = 1;
+
+      // Capture patterns like: "1 Shirt 2"
+      const fullPattern = name.match(/^\s*\d+\s*[\.\)]?\s+(.+?)\s+(?:x|X|\*)?\s*(\d{1,2})\s*$/);
+      if (fullPattern) {
+        const parsedQty = parseInt(fullPattern[2], 10);
+        if (parsedQty >= 1 && parsedQty <= 99) {
+          return {
+            name: normalizeWhitespace(fullPattern[1]),
+            quantity: parsedQty
+          };
+        }
+      }
+
+      // Remove starting serial no. such as "1 ", "2.", "3)"
+      name = name.replace(/^\d+\s*[\.\)]?\s*/, '');
+
+      // Extract trailing quantity markers like "* 2", "x2", "X 3", or trailing " 2"
+      const qtyMatch = name.match(/(?:^|[\s|])(?:x|X|\*)?\s*(\d{1,2})\s*$/);
+      if (qtyMatch) {
+        const parsedQty = parseInt(qtyMatch[1], 10);
+        const nameWithoutQty = normalizeWhitespace(name.slice(0, qtyMatch.index));
+        const hasReadableName = /[A-Za-z\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]/.test(nameWithoutQty);
+        if (hasReadableName && parsedQty >= 1 && parsedQty <= 99) {
+          quantity = parsedQty;
+          name = nameWithoutQty;
+        }
+      }
+
+      // Final cleanup to avoid "1 Shirt 1" style in UI.
+      name = name.replace(/^\d+\s+/, '');
+      const trailingQty = name.match(/^(.*\D)\s+(\d{1,2})$/);
+      if (trailingQty) {
+        const parsedTrailingQty = parseInt(trailingQty[2], 10);
+        if (parsedTrailingQty >= 1 && parsedTrailingQty <= 99) {
+          name = normalizeWhitespace(trailingQty[1]);
+          quantity = parsedTrailingQty;
+        }
+      }
+
+      return { name: normalizeWhitespace(name), quantity };
+    };
+
     // Second pass: Extract all items
-    lines.forEach((line, index) => {
+    lines.forEach((line) => {
       const trimmedLine = line.trim();
       if (!trimmedLine || trimmedLine.length < 2) return;
 
-      // Skip header lines or total lines
       if (/^(total|amount|balance|due|subtotal|sum|item|qty|quantity|description)/i.test(trimmedLine)) {
         return;
       }
 
-      // Check for line items with prices at the end of line
       const matches = [...trimmedLine.matchAll(priceRegex)];
       if (matches.length > 0) {
         const lastMatch = matches[matches.length - 1];
         const priceStr = lastMatch[1].replace(/,/g, '');
         const price = parseFloat(priceStr);
 
-        // Show all items regardless of price
         if (price > 0 && price < 10000000) {
-          let itemText = trimmedLine.substring(0, lastMatch.index).trim();
-
-          // Clean up item name
+          const itemText = trimmedLine.substring(0, lastMatch.index).trim();
           let cleanedName = itemText
-            .replace(/^\d+[\.\)]\s*/, '') // Remove "1. " or "1) "
-            .replace(/^[-•*]\s*/, '') // Remove bullet-like prefixes
-            .replace(/[:|]\s*$/, '') // Remove trailing colons or pipes
+            .replace(/^\d+[\.\)]\s*/, '')
+            .replace(/^(?:-|\u2022|\*)\s*/, '')
+            .replace(/[:|]\s*$/, '')
             .replace(/[^\w\s\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF\-\.\,\(\)\:\/\\'"]/g, ' ')
             .trim();
           cleanedName = normalizeWhitespace(cleanedName);
 
-          // Use "Item N" format if text is not clean (contains non-ASCII or garbage)
+          const quantityInfo = extractQuantityFromName(cleanedName);
+          cleanedName = quantityInfo.name;
+
           if (!isCleanText(cleanedName) || cleanedName.length === 0) {
             itemCount++;
             cleanedName = `Item ${itemCount}`;
           }
 
-          // Accept item if it has content or significant price
           if (cleanedName.length > 0 || price > 100) {
             foundItems.push({
               name: cleanedName || `Item ${foundItems.length + 1}`,
-              price: price,
+              price,
+              quantity: quantityInfo.quantity,
               isTotal: false
             });
 
-            console.log(`Item ${foundItems.length}:`, foundItems[foundItems.length - 1]);
-
-            // Sum items if no explicit total
             if (!hasExplicitTotal) {
               calculatedTotal += price;
             }
@@ -261,22 +393,24 @@ function App() {
 
     // If no items found, try alternative parsing - look for lines with just prices
     if (foundItems.length === 0) {
-      console.log('Trying alternative parsing method...');
       const priceOnlyRegex = /^\s*(\d{1,3}(?:,\d{3})+|\d{3,})\s*$/;
       let currentName = '';
-      
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        
-        // Check if this line is a price
         const priceMatch = line.match(priceOnlyRegex);
         if (priceMatch) {
           const price = parseFloat(priceMatch[1].replace(/,/g, ''));
           if (price > 0 && price < 10000000) {
             itemCount++;
+            const quantityInfo = extractQuantityFromName(currentName);
+            const cleanedFallbackName = isCleanText(quantityInfo.name)
+              ? normalizeWhitespace(quantityInfo.name)
+              : `Item ${itemCount}`;
             foundItems.push({
-              name: isCleanText(currentName) ? normalizeWhitespace(currentName) : `Item ${itemCount}`,
-              price: price,
+              name: cleanedFallbackName,
+              price,
+              quantity: quantityInfo.quantity,
               isTotal: false
             });
             if (!hasExplicitTotal) {
@@ -285,18 +419,17 @@ function App() {
           }
           currentName = '';
         } else if (line.length > 2 && !/^(total|amount|balance)/i.test(line)) {
-          // This might be an item name
           currentName = line;
         }
       }
     }
 
-    // Add total item at the end if we found one
     if (hasExplicitTotal) {
-      foundItems.push({ 
-        name: 'TOTAL', 
-        price: calculatedTotal, 
-        isTotal: true 
+      foundItems.push({
+        name: 'TOTAL',
+        price: calculatedTotal,
+        quantity: 1,
+        isTotal: true
       });
     }
 
@@ -308,7 +441,6 @@ function App() {
     setTotal(calculatedTotal);
     setStatus(`Done! Found ${foundItems.length} items`);
   };
-
   // Format currency in MMK
   const formatCurrency = (amount) => {
     return new Intl.NumberFormat('my-MM', {
@@ -481,4 +613,7 @@ function App() {
 }
 
 export default App;
+
+
+
 
