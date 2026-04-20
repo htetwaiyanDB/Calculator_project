@@ -2,6 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import Tesseract from 'tesseract.js';
 import './App.css';
 
+const PRIMARY_OCR_LANG = 'mya+eng';
+const FALLBACK_OCR_LANG = 'eng';
+
 function App() {
   const [image, setImage] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -102,22 +105,45 @@ function App() {
     try {
       setStatus('Processing image with OCR...');
 
-      // Single OCR attempt with English
-      const result = await Tesseract.recognize(
-        imageFile,
-        'eng',
-        {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
-              setProgress(Math.round(m.progress * 100));
-            } else {
-              setStatus(m.status);
-            }
-          },
-          tessjs_config_page_seg_mode: '3',
-        }
-      );
+      // Prefer Myanmar + English OCR for bilingual receipts; fallback to English.
+      let result;
+      try {
+        result = await Tesseract.recognize(
+          imageFile,
+          PRIMARY_OCR_LANG,
+          {
+            logger: (m) => {
+              if (m.status === 'recognizing text') {
+                setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
+                setProgress(Math.round(m.progress * 100));
+              } else {
+                setStatus(m.status);
+              }
+            },
+            tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+            preserve_interword_spaces: '1'
+          }
+        );
+      } catch (primaryError) {
+        console.warn('Primary OCR language failed, retrying with English:', primaryError);
+        setStatus('Retrying OCR with English...');
+        result = await Tesseract.recognize(
+          imageFile,
+          FALLBACK_OCR_LANG,
+          {
+            logger: (m) => {
+              if (m.status === 'recognizing text') {
+                setStatus(`Extracting text... ${Math.round(m.progress * 100)}%`);
+                setProgress(Math.round(m.progress * 100));
+              } else {
+                setStatus(m.status);
+              }
+            },
+            tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+            preserve_interword_spaces: '1'
+          }
+        );
+      }
 
       setStatus('Analyzing receipt data...');
       const extractedText = result.data.text;
@@ -150,11 +176,16 @@ function App() {
     const priceRegex = /(\d{1,3}(?:,\d{3})+|\d{3,})\s*(MMK|USD|\$|€|£)?$/gi;
     const totalRegex = /(total|amount|balance|due|subtotal|sum|grand\s*total)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(MMK|USD|\$|€|£)?/i;
 
-    // Helper function to check if text contains mostly ASCII printable characters
+    const normalizeWhitespace = (str) => str.replace(/\s+/g, ' ').trim();
+
+    // Accept valid Myanmar/Latin strings and reject obvious mojibake artifacts.
     const isCleanText = (str) => {
-      const cleanChars = str.replace(/[a-zA-Z0-9\s\-\.\,\(\)\:\/\\]/g, '').length;
-      const totalChars = str.length;
-      return cleanChars < totalChars * 0.3; // Less than 30% non-ASCII
+      const normalized = normalizeWhitespace(str.normalize('NFKC'));
+      if (!normalized) return false;
+      if (/[ÃÂâ�]/.test(normalized)) return false;
+
+      const allowedChars = normalized.match(/[A-Za-z0-9\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF\s\-\.\,\(\)\:\/\\'"]/g) || [];
+      return (allowedChars.length / normalized.length) >= 0.7;
     };
 
     // First pass: Look for explicit total line
@@ -197,9 +228,11 @@ function App() {
           // Clean up item name
           let cleanedName = itemText
             .replace(/^\d+[\.\)]\s*/, '') // Remove "1. " or "1) "
-            .replace(/^[-•]\s*/, '') // Remove "- " or "• "
+            .replace(/^[-•*]\s*/, '') // Remove bullet-like prefixes
             .replace(/[:|]\s*$/, '') // Remove trailing colons or pipes
+            .replace(/[^\w\s\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF\-\.\,\(\)\:\/\\'"]/g, ' ')
             .trim();
+          cleanedName = normalizeWhitespace(cleanedName);
 
           // Use "Item N" format if text is not clean (contains non-ASCII or garbage)
           if (!isCleanText(cleanedName) || cleanedName.length === 0) {
@@ -242,7 +275,7 @@ function App() {
           if (price > 0 && price < 10000000) {
             itemCount++;
             foundItems.push({
-              name: isCleanText(currentName) ? currentName : `Item ${itemCount}`,
+              name: isCleanText(currentName) ? normalizeWhitespace(currentName) : `Item ${itemCount}`,
               price: price,
               isTotal: false
             });
