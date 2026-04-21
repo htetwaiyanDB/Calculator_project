@@ -456,7 +456,7 @@ function App() {
       <div className="container">
         {/* Header */}
         <header className="header">
-          <h1 className="title">AI Receipt Scanner</h1>
+          <h1 className="title">SmartCalc</h1>
           <p className="subtitle">Scan, Extract & Calculate Automatically</p>
           <div className="live-badge">
             <span className="live-dot" />
